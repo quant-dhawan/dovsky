@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { promisify } from 'node:util';
+import { BubblewrapIsolation } from '../../daemon/dist/sandbox.js';
 
 const exec = promisify(execFile);
 const repository = path.resolve('.');
@@ -54,6 +55,16 @@ async function stopDaemon(daemon) {
 }
 
 test('built daemon and CLI cover offline operator routes and exit contracts', async t => {
+  const availability = await new BubblewrapIsolation({
+    sandboxRoot: path.join(os.tmpdir(), 'dovsky-cli-daemon-probe-unused'),
+    hiddenPaths: [],
+  }).available();
+  if (!availability.available) {
+    const reason = `Host sandbox unavailable: ${availability.reason}`;
+    if (process.env.DOVSKY_REQUIRE_SANDBOX === '1') assert.fail(reason);
+    t.skip(reason);
+    return;
+  }
   const root = await mkdtemp(path.join(os.tmpdir(), 'dovsky-cli-daemon-'));
   const project = path.join(root, 'project'), socketPath = path.join(root, 'run', 'daemon.sock'), configPath = path.join(root, 'config.json');
   await mkdir(project, { recursive: true });
