@@ -139,8 +139,9 @@ sequenceDiagram
   D-->>H: advisory provisional result
   D->>G: protect, no-op, red-before, quality
   G-->>D: pass or fail
+  D->>D: run evaluation if required
   D->>D: persist final evidence
-  D->>D: enqueue review/evaluation
+  D->>D: enqueue review
   H->>C: accept or reject
   C->>D: record terminal decision
 ```
