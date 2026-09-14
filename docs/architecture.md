@@ -1,0 +1,75 @@
+# Architecture
+
+## Domain
+
+- A **room** is the human-owned objective and discussion timeline.
+- A **job** is one provider thread inside a room.
+- A **turn** is one addressed prompt and its reply.
+- An **attempt** is one execution of a turn, including the single safe automatic retry.
+
+State transitions are append-only events applied transactionally with the materialized job record. Terminal states (`succeeded`, `failed`, `cancelled`) cannot be replaced.
+
+## Job spec and tiers
+
+A job carries `tier`, `model`, `effort`, `charter`, `cwd`, and gates. `TIER_TABLE` in `packages/protocol` maps a tier to a model and effort per provider (codex: luna/low, terra/medium, terra/xhigh, sol/xhigh; claude: sonnet/low, sonnet/high, opus/high, fable/xhigh). Models are checked against the `MODELS` allowlist and appended to the configured workflow argv (`-m`/`-c model_reasoning_effort=` or `--model`/`--effort`); the workflow argv fixes the sandbox and cannot be replaced by a client. A charter is `<cwd>/.claude/agents/<Name>.md`: `--agent` on claude, a frontmatter-stripped prompt prefix on codex. `cwd` must be a worktree of the project's repository and becomes the job's lock key. The resolved argv (prompt excluded) is stored on every attempt. The change workflow's claude argv runs with `--permission-mode acceptEdits --allowed-tools Bash`, so edits are auto-accepted and the worker can run Bash to prove red-before and its own tests; the review workflow's claude argv stays `--permission-mode manual --disallowed-tools Edit,Write,NotebookEdit`, so the read-only guarantee comes from the argv per workflow, not a runtime check.
+
+Every fresh `work` job is dispatched with a standing instruction ahead of its brief (`WORK_INSTRUCTION` in `apps/daemon/src/review.ts`: unattended, do not ask, inspect before deciding, the final reply is a standalone recap with `[needs-operator]` for what could not run), plus `CHANGE_INSTRUCTION` when the workflow is not read-only (the brief is the whole scope, targeted edits, no formatter, report nearby defects instead of fixing them, revert build artifacts). `providerPrompt` composes it into the provider's stdin at dispatch, after the codex charter and before `--- Task ---`; `job.prompt`, the room message and the reviewer's evidence keep the original brief. Resumed threads (follow-ups and corrections) and reviewer jobs do not get it; a reviewer carries `REVIEW_INSTRUCTION` in its own prompt.
+
+When a request names none of tier, model, or effort, the routing policy chooses the tier (see below). An explicit `--tier` is recorded separately as `requestedTier`.
+
+## Follow-ups and thread resume
+
+The provider's thread id (`thread.started` on codex, `system.init.session_id` on claude) is stored on the job. A follow-up to the same provider runs `codex exec resume <id>` or `claude -p --resume <id>` with only the new message as the prompt; when no thread id exists or the provider changes, the daemon replays the room transcript instead. A retry resumes the source's thread only when it runs the same model *and* the same effort: neither provider's resume takes a new effort, and codex's `routine` and `hard` tiers share a model, so an escalation between them starts fresh. A handoff always starts a new thread on the other provider with the source result verbatim.
+
+## Gates
+
+Gates run on the host, in the provider-mutated tree, after the provider and in this order: protected-path digest check, no-op check (tree changed or result matches `--require-change`), `--verify` under `sh -c`, red proof (a worktree at the start commit plus only the job's new test files must fail `--red-before` with a recognisable test failure — the bare word `error` no longer counts as one), then the workflow's quality commands. A job on a non-readOnly workflow gets `package.json`, the lockfile, and the file each of the workflow's `qualityCommands` executes (the script handed to an interpreter, or a command written as a path in the tree) added to its `--protect` list on top of any caller-supplied paths, since a host quality gate runs the repo's own scripts on the tree the worker just edited and a worker could otherwise rewrite what verifies it; deleting a protected path fails the check as `quality_gate` the same as changing one, and a protected symlink is fingerprinted by its target, so repointing it counts as a change. A command's remaining arguments are what it *checks*, not what verifies the job, so they are not protected. Any failure is a `quality_gate` failure. Progress events (`job.progress`) are emitted at most every five seconds while the provider streams; `progress.lastNote` carries the provider's latest assistant text (a Claude text block or a Codex agent message, one line cut to 200 characters), which the CLI exposes until the job has a result.
+
+## Routing policy and observations
+
+`routing_policy` holds one tier per `provider/workflow/charter` key. Every terminal transition writes the job's normalised cause (`capability` for gate failures and bad grades, `environmental` for auth, rate-limit, protocol, daemon, and cancel failures) and emits a `routing.observation.v1` event with the effective spec, tokens, duration, changed files, lineage, and grade. Evolution is computed from those rows inside the same transaction: promotion after two capability failures each fixed by a linked `retry --tier next` graded good; demotion only after twenty observations and three graded-good lower-tier jobs. Each change is a `routing.policy` event. Operators grade with `jobs.grade` and pin with `routing.set`.
+
+## Charter ladders
+
+A charter may declare its own routing policy in a `bus:` block in its frontmatter: `allowed` is an ordered list of `provider/tier` rungs, cheapest first, and `start` names the rung a fresh job enters at (default: the first). `dovsky send` may then omit `--to`, and the ladder picks the provider; the first rung at or after the start whose provider is configured for the workflow and is not quota-closed wins, and the skipped rungs are named in a `routing.rung` event. A ladder's tier beats the learned `routing_policy` row for that charter, and `dovsky routing` marks such rows `shadowedByLadder` and prints every ladder with per-rung `ran`, `laddered` and `approved` counts. Because a charter now carries policy, every non-readOnly job auto-protects `.claude/agents/*.md`: a job cannot rewrite the ladder that routes it.
+
+A job that fails on a rung climbs to the next open one automatically, running on the tree the failed attempt left, with the failure text appended to the original brief and `escalatedFrom` pointing back. Only a `capability` cause escalates, and never a `protect` or `require-change` gate failure — the first is a policy violation and the second is wording. When no rung is left, the room gets `routing.ladder.exhausted`. Two guards keep this from spending on the wrong thing: a workflow quality command that fails is re-run in a detached worktree at the job's start commit, and if it fails there too the job fails `gate_broken` (environmental, so nothing escalates and no policy moves); and a provider that announces a model the bus did not ask for fails `provider_protocol` instead of being trusted, so a charter's own `model:` line cannot silently override a rung.
+
+## Review loop
+
+When a job on a non-readOnly workflow reaches `succeeded`, the daemon captures immutable review evidence and, if review is enabled, inserts a reviewer job (`role = review`) in the same room inside the worker's finalization transaction; the scheduler runs it after commit. Reviewer jobs run at `depth + 1` and are never themselves reviewed. The reviewer's tier is `review.tier`, unless the change is small — at or under `review.small.maxFiles` changed files and `review.small.maxLines` changed lines, no protected path touched, and the evidence complete — in which case it runs at `review.small.tier` instead (default: 3 files, 150 lines, `routine`); `small: null` always reviews at `review.tier`. Only a tier the caller actually named (`--review-tier`, or a room's stored tier) suppresses the small tier; asking for a reviewer without naming one leaves the size rule in charge.
+
+Evidence is the exact job delta or nothing: pre-job dirty files (`git status --porcelain`) are copied to `artifacts/jobs/<workerId>/pre/` before the provider starts; at finalize, a pre-image and a unified diff with 20 lines of context for each changed path — no full post-image — are written to one artifact on the worker job, `artifacts/jobs/<workerId>/review-evidence.md` (kind `evidence`), with a SHA-256 header. It is captured for every successful non-readOnly job, so `dovsky review JOB` can reuse it after the tree has moved on. Evidence over 512 KiB, touching a binary file or symlink, or missing its pre-job snapshot is marked `INCOMPLETE`; incomplete evidence can only be reviewed `INCONCLUSIVE` or `REFUTED`, never `APPROVED`.
+
+The reviewer's cwd is a detached git worktree at the worker's start commit with the worker's pre-job dirty files copied over it (`artifacts/review-worktrees/<reviewerJobId>`, removed after the run), reusing the red-proof worktree pattern under the git-admin lock. That is the exact pre-job tree, so the baseline matches the evidence even when the job ran on uncommitted work (the first live review was inconclusive because the bare start commit lacked the uncommitted module the job's new test imported). It gives the reviewer baseline context without exposing the mutated tree, so a worker-planted `AGENTS.md`/`CLAUDE.md` cannot steer its own reviewer.
+
+The reviewer's reply must be numbered reasons (`path:line — defect and failure case`) followed by exactly one final non-empty line, `VERDICT: APPROVED | REFUTED | INCONCLUSIVE`. Anything else — a fenced sentinel, two sentinels, a sentinel not last, or `REFUTED` with no reasons — fails the reviewer job with `review_protocol` and produces no routing evidence.
+
+`finalizeReview` writes the verdict, the worker's grade, the routing observation, and the room projection in one transaction. `APPROVED` grades the worker good; `REFUTED` grades it bad with the reasons as the note; `INCONCLUSIVE` grades nothing. Grade source is `human` or `reviewer`; a human grade always wins and a reviewer never overwrites one. A reviewer `bad` on a succeeded job counts as a capability failure at that tier only when evidence was complete and it is the first refutation for the root job; promotion's good side and every demotion probe count human grades only. A policy row records the `evidence_job_ids` behind a promotion, so a later human regrade of one of them reverts that promotion in the same transaction.
+
+`RoomSummary.review` projects the room's latest review state (`pending | approved | refuted | inconclusive`, or null); `JobSummary.review` (a `ReviewView`) carries the reviewer job id, provider, tier, state and verdict on the job it reviewed, and `TurnView.role = "review"` marks a reviewer's brief and reply so replay excludes them from later follow-ups.
+
+Phase B (opt-in via `--review-rounds` or a workflow's `maxCorrections`) inserts a continuation job on `REFUTED` with corrections left, pinned to the worker's thread, spec, gates and end-of-job tree fingerprint; a retry likewise resumes the source job's provider thread when its provider and model are unchanged. The worker's `end_fingerprint` is stored at finalize and copied to the continuation's `parent_fingerprint`. Three safeguards keep it from running past the human: `review.superseded` when a newer human follow-up already continued the thread (no continuation is created), `review.stale` when the fingerprint moved before the correction launched (the continuation fails with `review_stale`, no provider run), and `review.exhausted` when a continuation is itself refuted with no corrections left. `needsAttention` derives from the jobs table: a failed or cancelled work job, a reviewer-graded-bad work job with no later work job in the room, or a succeeded work job whose review was skipped. When review was requested but no reviewer could be created (no read-only workflow, provider not configured, depth limit, quota guard) the worker's `review_skipped` column records the reason and `review.skipped` is emitted; grading the worker by hand clears it, since that is the review the bus skipped. The quota guard reads both the 5-hour and weekly Codex rate-limit windows, preferring whichever is stopping work and otherwise the higher, and ignores a reading whose reset time has passed, or one older than 24 hours with no reset time; the rollout scan reaches back 8 days, past every Codex window, so rollouts carrying no `rate_limits` cannot hide a live limit behind them; a Claude reading is used when one exists locally, but none does today — Claude Code keeps no local, credential-free record of percent-used and reset time the way Codex's rollout `rate_limits` does, so `readClaudeQuota` (`apps/daemon/src/claude-quota.ts`) always returns null and only the Codex windows gate review requests.
+
+## Process containment
+
+Providers and gates run in their own process group with an allowlisted environment plus `DOVSKY_DEPTH` and `DOVSKY_JOB_ID`; cancellation signals the whole group. The daemon refuses to launch at depth 2 and refuses new rooms with 20 or more queued jobs. On start, after the socket is bound, it recovers interrupted jobs (a second daemon on a live socket exits without touching them).
+
+Before any detached command is allowed to execute, the daemon stores a prepared
+execution lease, launches a closed gate, records the gate's PID, process group,
+Linux boot ID and `/proc` start ticks, then releases that gate. Provider attempts,
+quality gates, red proofs and evaluation commands all use this path. Normal close
+settles the lease only after the process group is absent. After a restart, a live
+or unverifiable group becomes `reconcile_required` and retains its job resources
+and task ownership; unrelated work can still run. `dovsky execution show JOB` and
+`dovsky execution reconcile JOB --expect REVISION [--terminate]` provide local
+inspection and identity-verified termination. No operation releases an uncertain
+lease merely because its job is terminal.
+
+## Trust boundaries
+
+The terminal client speaks newline-delimited RPC over a mode-0600 local Unix socket. Only the daemon writes SQLite or starts provider processes. The listener assigns the caller origin; request bodies cannot promote themselves to an operator. Mutation idempotency, configured command arrays, project roots, sandboxing, and same-UID filesystem permissions are cooperative single-user boundaries. Dovsky exposes no HTTP bridge and does not claim multi-user isolation.
+
+## Deliberate scope
+
+This release is single-user and single-host. It does not implement autonomous agent loops, arbitrary remote command execution, multi-user ACLs, dollar-cost accounting, or an external database. Tale and Koda informed the room/run ergonomics; Langfuse informed trace-style observability. None is a runtime dependency.

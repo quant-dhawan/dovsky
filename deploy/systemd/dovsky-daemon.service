@@ -1,0 +1,24 @@
+[Unit]
+Description=Dovsky v2 execution daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/dovsky
+Environment=DOVSKY_HOME=%h/.dovsky
+Environment=DOVSKY_CONFIG=%h/.config/dovsky/config.json
+# Optional mode-0600 GH_TOKEN file for headless GitHub authentication.
+EnvironmentFile=-%h/.config/dovsky/github.env
+# The user manager's PATH after a reboot has no ~/.local/bin, where claude and codex live; the wrapper adds node's bin dir.
+Environment="PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin"
+ExecStart=%h/.local/bin/nvm-default-node %h/dovsky/apps/daemon/dist/main.js
+Restart=on-failure
+RestartSec=3s
+UMask=0077
+# No NoNewPrivileges or PrivateTmp: either one breaks the Codex sandbox (bwrap needs user namespaces and the real /tmp).
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

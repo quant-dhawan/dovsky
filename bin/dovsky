@@ -1,0 +1,9 @@
+#!/usr/bin/env node
+import { main } from "../apps/cli/src/main.mjs";
+import { stripTerminalControl } from "../apps/cli/src/sanitize.mjs";
+
+main(process.argv.slice(2)).catch((error) => {
+  const code = typeof error?.code === "string" ? `${stripTerminalControl(error.code)}: ` : "";
+  process.stderr.write(`dovsky: ${code}${stripTerminalControl(error?.message ?? "CLI failed")}\n`);
+  process.exitCode = error?.exitCode ?? 2;
+});

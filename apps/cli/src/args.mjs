@@ -1,0 +1,7 @@
+import { readFile } from "node:fs/promises";
+export function parseArguments(argv) { const positionals = [], options = new Map(); for (let i = 0; i < argv.length; i += 1) { const value = argv[i]; if (!value.startsWith("--")) { positionals.push(value); continue; } const [name, inline] = value.slice(2).split("=", 2); if (inline !== undefined) options.set(name, inline); else if (argv[i + 1] !== undefined && !argv[i + 1].startsWith("--")) options.set(name, argv[++i]); else options.set(name, true); } return { positionals, options }; }
+export function usage(message) { const error = new Error(message); error.exitCode = 2; return error; }
+export function required(options, name) { const value = options.get(name); if (typeof value !== "string" || !value) throw usage(`Missing required --${name}`); return value; }
+export function positional(values, index, label) { if (!values[index]) throw usage(`${label} is required`); return values[index]; }
+export async function promptFrom(positionals, start) { const text = positionals.slice(start).join(" ").trim(); if (text) return text; if (process.stdin.isTTY) throw usage("Prompt/message is required (argument or stdin)"); return (await readFile("/dev/stdin", "utf8")).trim(); }
+export function integer(value, label, { min = 0, max = Number.MAX_SAFE_INTEGER } = {}) { const number = Number(value); if (!Number.isSafeInteger(number) || number < min || number > max) throw usage(`${label} must be an integer between ${min} and ${max}`); return number; }

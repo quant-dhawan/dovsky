@@ -1,0 +1,15 @@
+node_modules/
+dist/
+.build/
+coverage/
+*.log
+.env
+.env.*
+!.env.example
+config.local.json
+runtime/
+archive/
+worktrees/
+*.db
+*.db-shm
+*.db-wal

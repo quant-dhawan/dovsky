@@ -1,0 +1,114 @@
+{
+  "socketPath": "/home/USER/.dovsky/run/dovsky.sock",
+  "databasePath": "/home/USER/.dovsky/state/dovsky.db",
+  "artifactDirectory": "/home/USER/.dovsky/artifacts",
+  "maxActive": 3,
+  "maxQueuedJobs": 200,
+  "sandbox": {
+    "enabled": true,
+    "backend": "bwrap",
+    "network": true,
+    "memoryMax": "8G",
+    "cpuQuota": "400%",
+    "tasksMax": 512,
+    "homePaths": [],
+    "runtimePaths": [],
+    "dependencyRoots": []
+  },
+  "routing": { "bandit": { "enabled": true, "costPenalty": 0.15, "explorationCap": 0.15, "decay": 0.995 } },
+  "projects": [
+    {
+      "id": "dovsky",
+      "name": "Dovsky",
+      "path": "/home/USER/dovsky",
+      "defaultBranch": "main",
+      "github": {
+        "enabled": false,
+        "remote": "origin",
+        "repository": "OWNER/REPOSITORY",
+        "baseBranch": "main",
+        "commitName": "Dovsky",
+        "commitEmail": "dovsky@example.invalid",
+        "draft": false
+      },
+      "workflows": [
+        {
+          "id": "review",
+          "name": "Read-only review",
+          "readOnly": true,
+          "providerTimeoutMs": 3600000,
+          "gateTimeoutMs": 900000,
+          "qualityCommands": [],
+          "providers": {
+            "claude": {
+              "argv": [
+                "claude",
+                "-p",
+                "--verbose",
+                "--output-format",
+                "stream-json",
+                "--permission-mode",
+                "manual",
+                "--disallowed-tools",
+                "Edit,Write,NotebookEdit"
+              ]
+            },
+            "codex": {
+              "argv": [
+                "codex",
+                "exec",
+                "--json",
+                "--skip-git-repo-check",
+                "-s",
+                "read-only",
+                "-"
+              ]
+            }
+          }
+        },
+        {
+          "id": "change",
+          "name": "Implement and verify",
+          "readOnly": false,
+          "providerTimeoutMs": 3600000,
+          "gateTimeoutMs": 900000,
+          "review": { "enabled": true, "provider": "other", "tier": "hard", "maxCorrections": 1, "small": { "maxFiles": 3, "maxLines": 150, "tier": "routine" } },
+          "evaluation": { "enabled": true, "defaultLevel": "medium", "runner": "eval/scenarios.mjs", "dependencyRoots": ["node_modules"] },
+          "qualityCommands": [["npm", "test"], ["npm", "run", "build"]],
+          "providers": {
+            "claude": {
+              "argv": [
+                "claude",
+                "-p",
+                "--model",
+                "sonnet",
+                "--effort",
+                "high",
+                "--verbose",
+                "--output-format",
+                "stream-json",
+                "--permission-mode",
+                "acceptEdits",
+                "--allowed-tools",
+                "Bash"
+              ]
+            },
+            "codex": {
+              "argv": [
+                "codex",
+                "exec",
+                "--json",
+                "--skip-git-repo-check",
+                "-s",
+                "workspace-write",
+                "-c",
+                "sandbox_workspace_write.network_access=false",
+                "-"
+              ]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "name": "dovsky",
+  "private": true,
+  "version": "2.0.0",
+  "license": "FSL-1.1-ALv2",
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "npm run build -w @dovsky/protocol && npm run build -w @dovsky/daemon && npm run build -w @dovsky/legacy-import",
+    "test": "npm run build && npm run test -w @dovsky/protocol && npm run test -w @dovsky/daemon && npm run test -w @dovsky/legacy-import && node --test apps/cli/test/*.test.mjs eval/acceptance-cleanup.test.mjs",
+    "typecheck": "npm run typecheck -w @dovsky/protocol && npm run typecheck -w @dovsky/daemon && npm run typecheck -w @dovsky/legacy-import"
+  }
+}
