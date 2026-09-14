@@ -42,6 +42,16 @@ async function fixture(t: TestContext, isolation: JobIsolation | ((root: string)
   assert.fail('Disposable runtime fixture did not terminate');
 }
 
+async function requireNativeSandbox(t: TestContext): Promise<boolean> {
+  const isolation = createJobIsolation({ sandboxRoot: join(tmpdir(), 'dovsky-runtime-dispatch-probe'), hiddenPaths: [] });
+  const availability = await isolation.available();
+  if (availability.available) return true;
+  const reason = `Host sandbox unavailable: ${availability.reason}`;
+  if (process.env.DOVSKY_REQUIRE_SANDBOX === '1') assert.fail(reason);
+  t.skip(reason);
+  return false;
+}
+
 test('startup refuses unavailable strict isolation with the operator-facing code', async t => {
   let probes = 0;
   const isolation: JobIsolation = {
@@ -114,7 +124,7 @@ test('main gives --config precedence over DOVSKY_CONFIG', t => {
   });
   assert.notEqual(result.status, 0, result.stdout);
   assert.match(result.stderr, /DOVSKY_SANDBOX_UNAVAILABLE/);
-  assert.doesNotMatch(result.stderr, /ENOENT|Unexpected token/);
+  assert.doesNotMatch(result.stderr, /invalid\.json|Unexpected token/);
 });
 
 test('unavailable strict isolation cannot launch a provider in the canonical worktree', async t => {
@@ -128,6 +138,7 @@ test('unavailable strict isolation cannot launch a provider in the canonical wor
 });
 
 test('native strict dispatch applies a full dirty baseline only after actual scope absence', async t => {
+  if (!await requireNativeSandbox(t)) return;
   let sawPrivateOutput = false;
   const f = await fixture(t, root => {
     const isolation = createJobIsolation({ sandboxRoot: join(root, 'admin/artifacts/sandboxes'), hiddenPaths: [join(root, 'admin')] });
@@ -173,6 +184,7 @@ test('preparation refusal never falls back to direct provider execution', async 
 });
 
 test('a concurrent canonical mode change refuses private application without overwriting it', async t => {
+  if (!await requireNativeSandbox(t)) return;
   const f = await fixture(t, root => {
     const isolation = createJobIsolation({ sandboxRoot: join(root, 'admin/artifacts/sandboxes'), hiddenPaths: [join(root, 'admin')] });
     return { available: () => isolation.available(), prepare: async request => {
@@ -193,6 +205,7 @@ test('a concurrent canonical mode change refuses private application without ove
 });
 
 test('uncertain post-result scope observation retains the lease, locks and private storage', async t => {
+  if (!await requireNativeSandbox(t)) return;
   let disposals = 0;
   let sandboxDir = '';
   let actualAbsence = false;
@@ -221,6 +234,7 @@ test('uncertain post-result scope observation retains the lease, locks and priva
 });
 
 test('cancellation during scope enrollment keeps the actual failed-start identity without releasing the gate', async t => {
+  if (!await requireNativeSandbox(t)) return;
   let daemon: DovskyDaemon;
   const f = await fixture(t, root => {
     const isolation = createJobIsolation({ sandboxRoot: join(root, 'admin/artifacts/sandboxes'), hiddenPaths: [join(root, 'admin')] });
