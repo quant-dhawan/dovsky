@@ -1,4 +1,18 @@
+<div align="center">
+
 # Dovsky
+
+**Run Claude Code and Codex CLI like a disciplined team — sandboxed, evidenced, and human-accepted.**
+
+[![CI](https://github.com/quant-dhawan/dovsky/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/quant-dhawan/dovsky/actions/workflows/ci.yml)
+[![License: FSL-1.1-ALv2](https://img.shields.io/badge/license-FSL--1.1--ALv2-blue)](LICENSE)
+![Node.js 24+](https://img.shields.io/badge/node-%E2%89%A524-339933?logo=node.js&logoColor=white)
+![Platform: Linux](https://img.shields.io/badge/platform-Linux-FCC624?logo=linux&logoColor=black)
+![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)
+
+[Why Dovsky](#why-dovsky) · [How it works](#how-it-works) · [Quick start](#quick-start) · [Architecture](#architecture) · [Safety](#safety-guarantees) · [CLI](#cli-command-groups)
+
+</div>
 
 Dovsky is a local-first control plane for human-led Claude Code and Codex CLI
 work. One daemon owns provider processes and SQLite state; the `dovsky` CLI
@@ -9,6 +23,52 @@ It is deliberately single-user and single-host. Runtime state and artifacts
 stay outside Git under `${DOVSKY_HOME:-~/.dovsky}`. Configuration defaults to
 `~/.config/dovsky/config.json`; keep configuration and any credential files
 outside Git with operator-only permissions.
+
+## Why Dovsky
+
+Coding agents are fast, but "the agent said it's done" is not a release
+process. Dovsky puts one accountable loop around every agent run:
+
+| Without Dovsky | With Dovsky |
+| --- | --- |
+| Agents edit your working tree directly | Each attempt runs in a private bubblewrap view and its own systemd user scope; only the captured delta is applied |
+| "Done" means the model stopped talking | Host gates (`--verify`, `--red-before`, `--protect`, quality commands) must pass on the real tree |
+| Crashed or orphaned agent processes are guesswork | Execution leases record PID, boot ID and start ticks; anything unverifiable becomes `reconcile_required` |
+| Results live in a scrollback buffer | Jobs, evidence, reviews and decisions persist in SQLite with immutable terminal states |
+| Switching between Claude and Codex loses context | Rooms keep the thread: `followup` resumes it, `handoff` passes work to the other provider, `--to both` runs them side by side |
+| Acceptance is implicit | Acceptance is an explicit human decision, checked against the current tree and evidence |
+
+**Highlights**
+
+- 🔒 **Fail-closed sandboxing** — if bubblewrap, user namespaces, scope enrollment or resource limits can't be verified, nothing runs.
+- 🧾 **Immutable evidence** — baseline-to-final deltas, gate results and review evidence are kept, and acceptance can pin the exact evidence hash.
+- 🔁 **Claude ⇄ Codex in one room** — follow-ups, handoffs, disjoint reviewers and bounded review rounds.
+- ✅ **Human-gated acceptance** — `dovsky accept` records criteria and a note; `acceptance-check` rejects stale trees.
+- 🌳 **Bounded source outlines** — Tree-sitter summaries for JS/TS; the publication-candidate benchmark measured a **70.2% median payload reduction** at **42.8 ms warm p95**.
+- 🏠 **Local-first** — one daemon, one SQLite database, a mode-`0600` Unix socket. No hosted service, no HTTP API.
+
+## How it works
+
+1. **Send** — `dovsky send "…" --project app --workflow change` opens (or joins) a room and queues a job.
+2. **Isolate** — the daemon takes an execution lease, captures a baseline and launches the configured Claude or Codex command inside a private sandbox.
+3. **Gate** — the captured delta is validated and applied, then protect, no-op, red-before and quality gates run on the host.
+4. **Review** — evaluation and an optional disjoint reviewer produce immutable evidence; refutations can drive bounded corrections.
+5. **Accept** — you exercise the acceptance criteria and record `accept` or `reject`. Nothing is "done" until you say so.
+
+```sh
+dovsky send "Add retry to the upload client" --project app --workflow change \
+  --acceptance-file acceptance.json
+dovsky wait JOB            # proves execution, not acceptance
+dovsky diff JOB --stat     # inspect exactly what changed
+dovsky evidence JOB        # gates, review and evaluation evidence
+dovsky accept JOB --criteria 0 --note "Retry verified against a failing endpoint"
+```
+
+**Good fit:** a single developer or operator on Linux who runs Claude Code
+and/or Codex CLI against real repositories and wants isolation, an audit trail
+and an explicit acceptance step.
+**Not a fit (yet):** macOS/Windows hosts, multi-user teams needing ACLs, or
+fully autonomous agent loops — see [Limitations](#limitations).
 
 ## Quick start
 
@@ -292,3 +352,10 @@ Further design and verification detail is in
 [`docs/architecture.md`](docs/architecture.md),
 [`docs/sandbox.md`](docs/sandbox.md), [`docs/evaluation.md`](docs/evaluation.md),
 and [`docs/runbook.md`](docs/runbook.md).
+
+## License
+
+Dovsky is released under the [Functional Source License 1.1, ALv2 Future
+License](LICENSE). You may use, modify and redistribute it for any purpose
+other than a Competing Use. It also becomes available under the Apache License
+2.0 on the second anniversary of the date the software is made available.
