@@ -248,27 +248,39 @@ rounds are enabled. `dovsky review JOB` launches a new reviewer; use
 ## Interactive shell
 
 Run `dovsky` with no arguments in a terminal to open a session, in the style of
-`claude` and `codex`. Every CLI command is available as a `/` command with Tab
-completion. Plain text is sent as a follow-up to the current room.
+`claude` and `codex`. One terminal is one session and one room: your first
+message creates both, every later message is a follow-up in that room, and the
+shell waits for and prints each reply.
 
 ```text
-$ dovsky
-dovsky 2.0.0 · daemon ok · room: none
-dovsky> /send "Fix the redirect loop on /login" --project app --workflow change
-dovsky[ROOM]> /wait
-dovsky[ROOM]> also cover the logout path
-dovsky[ROOM]> /diff --stat
-dovsky[ROOM]> /accept --criteria 0 --note "Verified the observable outcome"
-dovsky[ROOM]> /exit
+$ dovsky --project app --workflow change
+dovsky 2.0.0 · app/change · to claude
+New session: type a message to start. /help for commands, /exit to leave.
+dovsky> Fix the redirect loop on /login
+claude working… (Ctrl-C stops waiting; the job keeps running)
+
+claude:
+Fixed the loop and added a regression test. ...
+
+dovsky> /diff --stat
+dovsky> /accept --criteria 0 --note "Verified the observable outcome"
+dovsky> /exit
 ```
 
-The shell remembers the room and job returned by `/send`, `followup` and
-similar commands, and fills them in when a command's `ROOM` or `JOB` argument
-is omitted. Shell-only commands are `/room [ID]`, `/job [ID]`,
-`/to claude|codex` (the recipient for plain text, default `claude`), `/clear`,
-`/help`, and `/exit`. `--socket` and `--json` given at launch apply to every
-command. When stdin is not a terminal, `dovsky` with no arguments prints help as
-before.
+Without `--project` or `--workflow` the shell asks. `dovsky --resume ROOM`
+reopens an existing room. `--to codex` sets the recipient (default `claude`).
+Other launch options such as `--tier`, `--model` or `--no-review` apply to
+every message.
+
+Every CLI command is available as a `/` command with Tab completion, and the
+room and latest job are filled in when a command's `ROOM` or `JOB` argument is
+omitted. Commands that would start another room (`/send`, `/sessions new`,
+`/record --title`) are refused: run `dovsky` in another terminal instead.
+Shell-only commands are `/room`, `/job [ID]`, `/to claude|codex`, `/clear`,
+`/help`, and `/exit`. `/wait` with no arguments follows the latest job again.
+Ctrl-C stops waiting for a reply (the job keeps running), clears the line at the
+prompt, and leaves the shell during any other command. When stdin is not a
+terminal, `dovsky` with no arguments prints help as before.
 
 ## CLI command groups
 

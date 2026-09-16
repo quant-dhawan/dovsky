@@ -10,24 +10,35 @@ import { contextSlot, splitLine } from "../src/shell.mjs";
 
 const exec = promisify(execFile);
 const cli = path.resolve("bin/dovsky");
-const shellEntry = `import(${JSON.stringify(path.resolve("apps/cli/src/shell.mjs"))}).then((m) => m.shell())`;
+const shellEntry = `import(${JSON.stringify(path.resolve("apps/cli/src/shell.mjs"))}).then((m) => m.shell({ argv: process.argv.slice(1) }))`;
+const oneProject = [{ id: "p", workflows: [{ id: "w" }] }];
 async function daemon(context, handler) {
   const root = await mkdtemp(path.join(os.tmpdir(), "dovsky-shell-"));
   const socketPath = path.join(root, "daemon.sock"), seen = [];
-  const server = createServer((socket) => { let input = ""; socket.setEncoding("utf8"); socket.on("data", (chunk) => { input += chunk; }); socket.on("end", () => { const request = JSON.parse(input); seen.push(request); socket.end(`${JSON.stringify({ id: request.id, ok: true, result: handler(request) })}\n`); }); });
+  const server = createServer((socket) => { let input = ""; socket.setEncoding("utf8"); socket.on("data", (chunk) => { input += chunk; }); socket.on("end", () => { const request = JSON.parse(input); seen.push(request); const reply = handler(request); socket.end(`${JSON.stringify(reply?.ok === false ? { id: request.id, ...reply } : { id: request.id, ok: true, result: reply })}\n`); }); });
   await new Promise((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
   context.after(() => server.close());
   return { socketPath, seen: (method) => seen.filter((request) => request.method === method) };
 }
-function session(socketPath, lines) {
+function session(socketPath, lines, args = []) {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ["-e", shellEntry], { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, DOVSKY_SOCKET: socketPath } });
+    const child = spawn(process.execPath, ["-e", shellEntry, "--", ...args], { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, DOVSKY_SOCKET: socketPath } });
     let stdout = "", stderr = "";
     child.stdout.on("data", (chunk) => { stdout += chunk; }); child.stderr.on("data", (chunk) => { stderr += chunk; });
     child.on("error", reject); child.on("close", (code) => resolve({ code, stdout, stderr }));
     child.stdin.end(`${lines.join("\n")}\n`);
   });
 }
+const agent = (rooms = {}) => (request) => {
+  if (request.method === "projects.list") return rooms.projects ?? oneProject;
+  if (request.method === "sessions.create") return { sessionId: "s1" };
+  if (request.method === "rooms.create") return { roomId: "r1", jobIds: ["j1"] };
+  if (request.method === "rooms.get") return rooms.get ?? { room: { id: request.params.roomId, projectId: "p", sessionId: "s1" }, jobs: [] };
+  if (request.method === "messages.create") return { roomId: request.params.roomId, jobIds: [`j${request.params.body.length}`] };
+  if (request.method === "jobs.get") return { id: request.params.jobId, provider: "claude", ...(rooms.job ?? { state: "succeeded" }) };
+  if (request.method === "jobs.result") return { result: `reply for ${request.params.jobId}` };
+  return { ok: true };
+};
 
 test("splitLine honours quotes and escapes", () => {
   assert.deepEqual(splitLine(`send "fix the login"  --note 'a "b"' c\\ d`), ["send", "fix the login", "--note", `a "b"`, "c d"]);
@@ -45,46 +56,72 @@ test("context slots come from the usage table", () => {
   assert.equal(contextSlot("execution"), null);
 });
 
-test("send selects room and job, which later commands and plain text reuse", async (context) => {
-  const fake = await daemon(context, (request) => {
-    if (request.method === "rooms.open") return { roomId: "r1", jobIds: ["j1"] };
-    if (request.method === "jobs.get") return { id: request.params.jobId, state: "succeeded" };
-    if (request.method === "messages.create") return { roomId: request.params.roomId, jobIds: ["j2"] };
-    if (request.method === "rooms.get") return { room: { id: request.params.roomId }, jobs: [] };
-    return { ok: true };
-  });
-  const { code, stdout, stderr } = await session(fake.socketPath, ["/send fix the login --project p --workflow w", "/wait", "please add a test", "/to codex", "and another", "/status --json", "/exit", "/ls"]);
-  assert.equal(code, 0, stderr + stdout);
-  assert.match(stdout, /dovsky 2\.0\.0 · daemon ok · room: none/);
-  assert.equal(fake.seen("rooms.open")[0].params.prompt, "fix the login");
-  assert.deepEqual(fake.seen("jobs.get").map((request) => request.params.jobId), ["j1"]);
-  assert.deepEqual(fake.seen("messages.create").map((request) => [request.params.roomId, request.params.body, request.params.recipient]), [["r1", "please add a test", "claude"], ["r1", "and another", "codex"]]);
+test("one terminal is one session and one room: the first message creates them, later ones follow up", async (context) => {
+  const fake = await daemon(context, agent());
+  const { code, stdout } = await session(fake.socketPath, ["fix the login", "/to codex", "add a test", "/status --json", "/send other --project p --workflow w", "/record --title T --project p --workflow w --author human hi", "/sessions new T --project p --workflow w", "/room", "/exit", "never sent"], ["--tier", "large"]);
+  assert.equal(code, 0);
+  assert.match(stdout, /dovsky 2\.0\.0 · p\/w · to claude/);
+  assert.deepEqual(fake.seen("sessions.create").map((request) => request.params), [{ title: "fix the login", projectId: "p", workflowId: "w" }]);
+  const [created, ...others] = fake.seen("rooms.create");
+  assert.equal(others.length, 0);
+  assert.deepEqual([created.params.sessionId, created.params.prompt, created.params.recipients, created.params.tier], ["s1", "fix the login", ["claude"], "large"]);
+  assert.deepEqual(fake.seen("messages.create").map((request) => [request.params.roomId, request.params.body, request.params.recipient, request.params.tier]), [["r1", "add a test", "codex", "large"]]);
+  assert.match(stdout, /claude:\nreply for j1\n/);
+  assert.match(stdout, /reply for j10/);
   assert.deepEqual(fake.seen("rooms.get").map((request) => request.params.roomId), ["r1"]);
-  assert.equal(fake.seen("rooms.list").length + fake.seen("jobs.list").length, 0, "nothing runs after /exit");
+  assert.equal(stdout.match(/bound to one session and room/g).length, 3);
+  assert.match(stdout, /room: r1 · session: s1 · p\/w/);
+  assert.equal(fake.seen("turns.record").length + fake.seen("rooms.open").length, 0);
 });
 
-test("record --title starts a new room and never receives the current room", async (context) => {
-  const fake = await daemon(context, (request) => request.method === "rooms.open" ? { roomId: "r1", jobIds: ["j1"] } : { roomId: "r2", turnId: "t" });
-  await session(fake.socketPath, ["/send go --project p --workflow w", "/record --title Foo --project p --workflow w --author human hi", "/record --author human noted"]);
-  assert.deepEqual(fake.seen("turns.record").map((request) => [request.params.roomId, request.params.body]), [[undefined, "hi"], ["r2", "noted"]]);
+test("without --project and --workflow the shell asks, and --resume binds an existing room", async (context) => {
+  const fake = await daemon(context, agent({ projects: [{ id: "a", workflows: [{ id: "w" }] }, { id: "b", name: "Bee", workflows: [{ id: "review" }, { id: "change" }] }] }));
+  const picked = await session(fake.socketPath, ["9", "2", "change", "/room"]);
+  assert.match(picked.stdout, /2\. b \(Bee\)/);
+  assert.match(picked.stdout, /room: none yet · session: none yet · b\/change/);
+  const unknown = await session(fake.socketPath, [], ["--project", "zzz"]);
+  assert.equal(unknown.code, 2);
+  assert.match(unknown.stdout, /Unknown project zzz; choose one of: a, b/);
+  const resumed = await session(fake.socketPath, ["hello"], ["--resume", "r9"]);
+  assert.match(resumed.stdout, /Resumed room r9/);
+  assert.deepEqual(fake.seen("messages.create").map((request) => request.params.roomId), ["r9"]);
+  assert.equal(fake.seen("sessions.create").length, 0);
 });
 
-test("errors are reported and the session continues", async (context) => {
-  const fake = await daemon(context, () => ({ items: [] }));
-  const { code, stdout, stderr } = await session(fake.socketPath, ["/nope", "/wait", "hello", `/send "open`, "/doctor"]);
-  assert.equal(code, 0, stderr + stdout);
+test("a failed room creation reuses the session on the next message", async (context) => {
+  let attempts = 0;
+  const handler = agent();
+  const fake = await daemon(context, (request) => request.method === "rooms.create" && (attempts += 1) === 1 ? { ok: false, error: { code: "QUOTA_EXCEEDED", message: "no open rung" } } : handler(request));
+  const { stdout } = await session(fake.socketPath, ["first try", "second try"]);
+  assert.match(stdout, /QUOTA_EXCEEDED: no open rung/);
+  assert.equal(fake.seen("sessions.create").length, 1);
+  assert.deepEqual(fake.seen("rooms.create").map((request) => request.params.sessionId), ["s1", "s1"]);
+  assert.match(stdout, /reply for j1/);
+});
+
+test("failed jobs are reported and errors never end the session", async (context) => {
+  const fake = await daemon(context, agent({ job: { state: "failed", failure: { code: "provider_exit", message: "exited 1" } } }));
+  const { code, stdout } = await session(fake.socketPath, ["/nope", "/wait", `/send "open`, "do it", "/wait", "/doctor"], ["--project", "p"]);
+  assert.equal(code, 0);
   assert.match(stdout, /Unknown command \/nope/);
-  assert.match(stdout, /dovsky: Job ID is required/);
-  assert.match(stdout, /No room selected/);
+  assert.match(stdout, /No job yet/);
   assert.match(stdout, /Unterminated quote/);
-  assert.equal(fake.seen("doctor").length, 2, "banner check plus /doctor");
+  assert.equal(stdout.match(/claude failed: exited 1 \(job j1\)/g).length, 2);
+  assert.equal(fake.seen("doctor").length, 1);
+});
+
+test("an unreachable daemon exits 2 with a transport error", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "dovsky-shell-"));
+  const { code, stdout } = await session(path.join(root, "missing.sock"), []);
+  assert.equal(code, 2);
+  assert.match(stdout, /TRANSPORT: Could not contact daemon/);
 });
 
 test("help lists slash commands and shell built-ins", async (context) => {
-  const fake = await daemon(context, () => ({}));
+  const fake = await daemon(context, agent());
   const { stdout } = await session(fake.socketPath, ["/help"]);
   assert.match(stdout, /\/accept JOB/);
-  assert.match(stdout, /\/room \[ID\]/);
+  assert.match(stdout, /\/to claude\|codex/);
   assert.doesNotMatch(stdout, /dovsky accept/);
 });
 
