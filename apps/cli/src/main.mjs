@@ -3,10 +3,12 @@ import { print, printText } from "./format.mjs";
 import { renderHelp } from "./help.mjs";
 import { keyFor, request, RpcError, socketFor } from "./rpc.mjs";
 import { stripTerminalControl } from "./sanitize.mjs";
+import { shell } from "./shell.mjs";
 import { commandFor, table } from "./table.mjs";
 
 export async function main(argv) {
   const { positionals, options } = parseArguments(argv);
+  if (!positionals.length && !options.has("help") && process.stdin.isTTY && process.stdout.isTTY) return shell({ argv });
   const name = positionals[0] ?? "help";
   if (name === "help" || name === "--help" || options.has("help")) { process.stdout.write(renderHelp(table)); return; }
   const entry = commandFor(name);
@@ -24,7 +26,7 @@ export async function main(argv) {
     throw error;
   }
   if (outcome.text !== undefined) { process.stdout.write(stripTerminalControl(outcome.text)); process.exitCode = outcome.negative ? 1 : 0; return; }
-  if (outcome.result !== undefined && !outcome.method) { print(outcome.result, options.has("json")); process.exitCode = outcome.negative ? 1 : 0; return; }
+  if (outcome.result !== undefined && !outcome.method) { print(outcome.result, options.has("json")); process.exitCode = outcome.negative ? 1 : 0; return outcome.result; }
   let result;
   try {
     result = await rpc(outcome.method, outcome.params ?? {}, outcome.mutation ? keyFor(options, outcome.key) : undefined, outcome.mutation);
@@ -39,6 +41,7 @@ export async function main(argv) {
   print(result, options.has("json"));
   if (outcome.notice && !options.has("json")) process.stderr.write(`${stripTerminalControl(outcome.notice)}\n`);
   if (outcome.negative || (name === "doctor" && result?.ok === false)) process.exitCode = 1;
+  return result;
 }
 
 export { RpcError };
